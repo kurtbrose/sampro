@@ -32,8 +32,8 @@ class Sampler(object):
                 if frame is sampler_frame:
                     continue
                 prev_code = frame.f_code
+                call_count_map[(prev_code, frame.f_lineno, None)] += 1
                 cur = frame.f_back
-                call_count_map[(prev_code, None, None)] += 1
 
                 while cur:
                     cur_code = cur.f_code
