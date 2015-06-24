@@ -37,7 +37,7 @@ class Sampler(object):
     For cross-platform compatibility, this implementation relies on a thread and sleep.
     '''
     def __init__(self):
-        self.rooted_leaf_counts = collections.defaultdict(collections.defaultdict(int))
+        self.rooted_leaf_counts = collections.defaultdict(lambda: collections.defaultdict(int))
         self.stack_counts = {}
         self.max_stacks = 10000
         self.skipped_stack_samples = 0
@@ -45,9 +45,10 @@ class Sampler(object):
         self.started = False
         self.thread = None
         self.data_lock = threading.Lock()
+        self.sample_count = 0  # convenience for calculating percentages
 
     def sample(self):
-        call_count_map = self.call_count_map  # eliminate attribute access
+        self.sample_count += 1
         with self.data_lock:
             sampler_frame = sys._getframe()
             cur_samples = []
@@ -86,6 +87,7 @@ class Sampler(object):
             cur = {}
             for key, count in counts.items():
                 code, lineno = key
+                cur.setdefault(code.co_filename, 0)
                 cur[code.co_filename] += count
             rooted_file_samples[root] = cur
         return rooted_file_samples
@@ -106,7 +108,7 @@ class Sampler(object):
                 if code.co_filename != filename:
                     continue
                 cur[lineno] = count
-            rooted_lines_samples[root] = cur
+            rooted_line_samples[root] = cur
         return rooted_line_samples
 
     def hotspots(self):
