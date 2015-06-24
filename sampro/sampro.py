@@ -120,8 +120,8 @@ class Sampler(object):
         line_samples = {}
         for _, counts in rooted_leaf_samples.items():
             for key, count in counts.items():
-                code, lineno = key
-                line_samples[(code, lineno)] += count
+                line_samples.setdefault(key, 0)
+                line_samples[key] += count
         return sorted(
             line_samples.items(), key=lambda v: v[1], reverse=True)
 
