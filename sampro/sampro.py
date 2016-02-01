@@ -18,6 +18,7 @@ is kept.
 '''
 import sys
 import threading
+import signal
 import collections
 import time
 import random
@@ -31,50 +32,43 @@ import random
 
 # { (caller code object, caller line no, callee code object) : count }
 
-class Sampler(object):
+class _BaseSampler(object):
     '''
     A Sampler that will periodically sample the running stacks of all Python threads.
-    For cross-platform compatibility, this implementation relies on a thread and sleep.
     '''
     def __init__(self):
         self.rooted_leaf_counts = collections.defaultdict(lambda: collections.defaultdict(int))
         self.stack_counts = {}
         self.max_stacks = 10000
         self.skipped_stack_samples = 0
-        self.stopping = False
-        self.started = False
-        self.thread = None
-        self.data_lock = threading.Lock()
         self.sample_count = 0  # convenience for calculating percentages
 
     def sample(self):
         self.sample_count += 1
-        with self.data_lock:
-            sampler_frame = sys._getframe()
-            cur_samples = []
-            for thread_id, frame in sys._current_frames().items():
-                if frame is sampler_frame:
-                    continue
-                stack = []
-                cur = frame
-                while cur:
-                    stack.extend((cur.f_code, cur.f_lineno))
-                    cur, last = cur.f_back, cur
-                self.rooted_leaf_counts[last.f_code][(frame.f_code, frame.f_lineno)] += 1
-                stack = tuple(stack)
-                if stack not in self.stack_counts:
-                    if len(self.stack_counts) > self.max_stacks:
-                        self.skipped_stack_samples += 1
-                    self.stack_counts[stack] = 1
-                else:
-                    self.stack_counts[stack] += 1
+        sampler_frame = sys._getframe()
+        cur_samples = []
+        for thread_id, frame in sys._current_frames().items():
+            if frame is sampler_frame:
+                continue
+            stack = []
+            cur = frame
+            while cur:
+                stack.extend((cur.f_code, cur.f_lineno))
+                cur, last = cur.f_back, cur
+            self.rooted_leaf_counts[last.f_code][(frame.f_code, frame.f_lineno)] += 1
+            stack = tuple(stack)
+            if stack not in self.stack_counts:
+                if len(self.stack_counts) > self.max_stacks:
+                    self.skipped_stack_samples += 1
+                self.stack_counts[stack] = 1
+            else:
+                self.stack_counts[stack] += 1
 
     def live_data_copy(self):
-        with self.data_lock:
-            rooted_leaf_counts = {}
-            for k, v in self.rooted_leaf_counts.items():
-                rooted_leaf_counts[k] = dict(v)
-            return rooted_leaf_counts, dict(self.stack_counts)
+        rooted_leaf_counts = {}
+        for k, v in self.rooted_leaf_counts.items():
+            rooted_leaf_counts[k] = dict(v)
+        return rooted_leaf_counts, dict(self.stack_counts)
 
     def rooted_samples_by_file(self):
         '''
@@ -142,12 +136,30 @@ class Sampler(object):
                 stack_elements.append("{0}`{1}`{2}".format(
                     root, code.co_filename, code.co_name))
             flame_key = ';'.join(stack_elements)
-            flame_map.set_default(flame_key, 0)
+            flame_map.setdefault(flame_key, 0)
             flame_map[flame_key] += count
         return flame_map
 
     def start(self):
-        'start a background thread that will sample ~100x per second'
+        raise NotImplemented()
+
+    def stop(self):
+        raise NotImplemented()
+
+
+class ThreadedSampler(_BaseSampler):
+    '''
+    This implementation relies on a thread and sleep.
+    '''
+    def __init__(self):
+        super(ThreadedSampler, self).__init__()
+        self.stopping = threading.Event()
+        self.data_lock = threading.Lock()
+        self.thread = None
+        self.started = False
+
+    def start(self):
+        'start a background thread that will sample ~50x per second'
         if self.started:
             raise ValueError("Sampler.start() may only be called once")
         self.started = True
@@ -156,13 +168,75 @@ class Sampler(object):
         self.thread.start()
 
     def stop(self):
-        self.stopping = True
+        self.stopping.set()
 
     def _run(self):
-        while not self.stopping:
+        while not self.stopping.wait(0.01 * (1 + random.random())):
             self.sample()
-            time.sleep(0.01 * (1 + random.random()))  # sample 50x per second
+            # sample 50x per second
             # NOTE: sleep for a random amount of time to avoid syncing with
             # other processes (e.g. if another thread is doing something at 
             # a regular interval, we may always catch that process at the
             # same point in its cycle)
+
+
+Sampler = ThreadedSampler
+
+
+if hasattr(signal, "setitimer"):
+    class SignalSampler(_BaseSampler):
+        def __init__(self, which="real"):
+            '''
+            Gather performance samples ~50x / second using interrupt timers.
+            One of "real", "virtual", or "prof".
+            From setitimer man page, meaning of these values:
+                real: decrements in real time, and delivers SIGALRM upon expiration.
+                virtual: decrements only when the process is executing, and
+                         delivers SIGVTALRM upon expiration.
+                prof: decrements both when the process executes and when the
+                      system is executing on behalf of the process.  Coupled
+                      with ITIMER_VIRTUAL, this timer is usually used to
+                      profile the time spent by the application in user and
+                      kernel space.  SIGPROF is delivered upon expiration.
+
+            Note that signals are inherently global for the entire process.
+            '''
+            try:
+                _which = {
+                    'real': signal.ITIMER_REAL,
+                    'virtual': signal.ITIMER_VIRTUAL,
+                    'prof': signal.ITIMER_PROF
+                }[which]
+            except KeyError:
+                raise ValueError("which must be one of 'real', 'virtual', or 'prof'"
+                    " (got {0})".format(repr(which)))
+            self.which = _which
+            self.signal = {
+                signal.ITIMER_REAL: signal.SIGALRM,
+                signal.ITIMER_VIRTUAL: signal.SIGVTALRM,
+                signal.ITIMER_PROF: signal.SIGPROF}[self.which]
+            if signal.getsignal(self.signal) not in (None, signal.SIG_DFL, signal.SIG_IGN):
+                raise EnvironmentError("handler already attached for signal")
+            self.started = False
+            self.stopping = False
+
+        def  start(self):
+            'start sampling interrupts'
+            if self.started:
+                return
+            self.started = True
+            signal.signal(self.signal, self._resample)
+            signal.setitimer(self.which, 0.01 * (1 + random.random()))
+
+        def stop(self):
+            self.stopping = True
+            self.setitimer(self.signal, 0)
+
+        def _resample(self):
+            if stopping:
+                return
+            self.sample()
+            self.setitimer(self.which, 0.01 * (1 + random.random()))
+
+
+    Sampler = SingalSampler
