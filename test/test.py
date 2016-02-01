@@ -7,8 +7,8 @@ import sampro
 
 
 def test():
-    samplers = [sampro.Sampler(), sampro.ThreadedSampler()]
-    if hasattr(sampro, "SingalSampler"):
+    samplers = [sampro.ThreadedSampler()]
+    if hasattr(sampro, "SignalSampler"):
         samplers.append(sampro.SignalSampler())
     for s in samplers:
         s.start()
@@ -17,13 +17,14 @@ def test():
         s.stop()
     for s in samplers:
         assert s.sample_count, "sampler {0} didn't run".format(repr(s))
+        print 'sampler', s, 'ran', s.sample_count, 'times'
         s.live_data_copy()
         files = s.rooted_samples_by_file().keys()
         for f in files:
             s.rooted_samples_by_line(f)
         s.hotspots()
         s.flame_map()
-
+        
 
 import time
 

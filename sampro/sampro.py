@@ -201,6 +201,7 @@ if hasattr(signal, "setitimer"):
 
             Note that signals are inherently global for the entire process.
             '''
+            super(SignalSampler, self).__init__()
             try:
                 _which = {
                     'real': signal.ITIMER_REAL,
@@ -225,18 +226,21 @@ if hasattr(signal, "setitimer"):
             if self.started:
                 return
             self.started = True
-            signal.signal(self.signal, self._resample)
+            self.rollback = signal.signal(self.signal, self._resample)
             signal.setitimer(self.which, 0.01 * (1 + random.random()))
 
         def stop(self):
+            if not self.started:
+                return
             self.stopping = True
-            self.setitimer(self.signal, 0)
+            signal.setitimer(self.which, 0)
+            signal.signal(self.signal, self.rollback)
 
-        def _resample(self):
-            if stopping:
+        def _resample(self, signum, frame):
+            if self.stopping:
                 return
             self.sample()
-            self.setitimer(self.which, 0.01 * (1 + random.random()))
+            signal.setitimer(self.which, 0.01 * (1 + random.random()))
 
 
-    Sampler = SingalSampler
+    Sampler = SignalSampler
